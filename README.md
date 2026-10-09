@@ -4,9 +4,9 @@
 Bot WhatsApp canggih berbasis **Baileys API** yang digunakan untuk mendeteksi Bio WhatsApp, memantau OTP Cooldown, dan melakukan Mass Check. Dilengkapi dengan sistem Database SQLite, Rate Limiting, Sistem Premium (Tier), dan metode login **Pairing Code** (Tanpa Scan QR).
 
 <p align="center">
-  <a href="https://wa.me/6281234567890"><img src="https://img.shields.io/badge/WhatsApp-25D366?style=for-the-badge&logo=whatsapp&logoColor=white" alt="WhatsApp"/></a>
+  <a href="https://wa.me/628985035456"><img src="https://img.shields.io/badge/WhatsApp-25D366?style=for-the-badge&logo=whatsapp&logoColor=white" alt="WhatsApp"/></a>
   <a href="https://t.me/anggaofficial"><img src="https://img.shields.io/badge/Telegram-2CA5E0?style=for-the-badge&logo=telegram&logoColor=white" alt="Telegram"/></a>
-  <a href="https://youtube.com/@anggaofficial"><img src="https://img.shields.io/badge/YouTube-FF0000?style=for-the-badge&logo=youtube&logoColor=white" alt="YouTube"/></a>
+  <a href="https://youtube.com/@bacotamatpro3"><img src="https://img.shields.io/badge/YouTube-FF0000?style=for-the-badge&logo=youtube&logoColor=white" alt="YouTube"/></a>
 </p>
 
 <p align="center">
@@ -148,6 +148,3 @@ Jika menemukan bug atau ingin bertanya seputar script ini, silakan hubungi melal
 
 ---
 
-### 💡 Tips Tambahan untuk Anda:
-1. **Ganti Link Sosial Media:** Di dalam file `README.md` di atas, cari link seperti `https://wa.me/6281234567890`, `https://t.me/anggaofficial`, dan `https://youtube.com/@anggaofficial` lalu ganti dengan link asli milik Anda.
-2. Jika Anda meng-upload project ini ke **GitHub**, file `README.md` ini akan otomatis ditampilkan di halaman utama repository Anda dengan tampilan yang sangat keren dan profesional!
