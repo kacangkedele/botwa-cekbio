@@ -1,8 +1,6 @@
 // ============================================================
-//  BOT WHATSAPP CEK BIO - By Angga Official
-//  Pairing Code Method | Termux Ready
-//  Features: Cek Bio, Cooldown Monitor, Mass Check, Premium,
-//            Payment, Admin Tools, Rate Limit, SQLite DB
+//  BOT WHATSAPP CEK BIO - By Angga Official (JSON DB Version)
+//  100% Termux Ready - Pairing Code Fixed
 // ============================================================
 
 const {
@@ -15,83 +13,80 @@ const {
 const { Boom } = require('@hapi/boom');
 const pino = require('pino');
 const readline = require('readline');
-const Database = require('better-sqlite3');
 const fs = require('fs');
-const path = require('path');
 const chalk = require('chalk');
 const { config } = require('./config');
 
-// ============ DATABASE SETUP ============
-const db = new Database(config.dbPath);
+// ============ JSON DATABASE SETUP ============
+const dbPath = './database.json';
+let db = {
+    users: {},
+    stats: { total_detections: 0, total_mass_checks: 0 },
+    pending: {},
+    cooldowns: {},
+    activity_log: []
+};
 
-db.exec(`
-    CREATE TABLE IF NOT EXISTS users (
-        user_id TEXT PRIMARY KEY,
-        username TEXT,
-        tier TEXT DEFAULT 'Free',
-        usage INTEGER DEFAULT 0,
-        last_reset TEXT,
-        expire_date TEXT,
-        referred_by TEXT,
-        join_date TEXT
-    );
-    CREATE TABLE IF NOT EXISTS stats (
-        id INTEGER PRIMARY KEY,
-        total_detections INTEGER DEFAULT 0,
-        total_mass_checks INTEGER DEFAULT 0
-    );
-    INSERT OR IGNORE INTO stats (id, total_detections, total_mass_checks) VALUES (1, 0, 0);
-    CREATE TABLE IF NOT EXISTS pending (
-        user_id TEXT PRIMARY KEY,
-        tier TEXT,
-        timestamp TEXT
-    );
-    CREATE TABLE IF NOT EXISTS cooldowns (
-        phone TEXT PRIMARY KEY,
-        status TEXT,
-        last_check TEXT,
-        cooldown_until TEXT
-    );
-    CREATE TABLE IF NOT EXISTS activity_log (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id TEXT,
-        action TEXT,
-        detail TEXT,
-        timestamp TEXT
-    );
-`);
+if (fs.existsSync(dbPath)) {
+    try {
+        const data = fs.readFileSync(dbPath, 'utf-8');
+        db = JSON.parse(data);
+        if(!db.stats) db.stats = { total_detections: 0, total_mass_checks: 0 };
+        if(!db.users) db.users = {};
+        if(!db.pending) db.pending = {};
+        if(!db.cooldowns) db.cooldowns = {};
+        if(!db.activity_log) db.activity_log = [];
+    } catch (e) {
+        console.error('Database JSON corrupt, membuat baru...', e);
+    }
+}
+
+function saveDB() {
+    fs.writeFileSync(dbPath, JSON.stringify(db, null, 2));
+}
 
 // ============ HELPER: DATABASE ============
 function logActivity(userId, action, detail = '') {
     const now = new Date().toISOString();
-    db.prepare('INSERT INTO activity_log (user_id, action, detail, timestamp) VALUES (?, ?, ?, ?)')
-      .run(userId, action, detail, now);
+    db.activity_log.push({ user_id: userId, action, detail, timestamp: now });
+    if (db.activity_log.length > 1000) db.activity_log.shift();
+    saveDB();
 }
 
 function getUser(userId, username = 'TidakAda', referredBy = null) {
     const today = new Date().toISOString().split('T')[0];
-    let user = db.prepare('SELECT * FROM users WHERE user_id = ?').get(userId);
-
-    if (!user) {
-        db.prepare(`INSERT INTO users (user_id, username, tier, usage, last_reset, expire_date, referred_by, join_date)
-                    VALUES (?, ?, 'Free', 0, ?, NULL, ?, ?)`)
-          .run(userId, username, today, referredBy, today);
-        user = db.prepare('SELECT * FROM users WHERE user_id = ?').get(userId);
+    if (!db.users[userId]) {
+        db.users[userId] = {
+            user_id: userId,
+            username: username,
+            tier: 'Free',
+            usage: 0,
+            last_reset: today,
+            expire_date: null,
+            referred_by: referredBy,
+            join_date: today
+        };
+        saveDB();
+    }
+    
+    let user = db.users[userId];
+    
+    if (user.username !== username && username !== 'TidakAda') {
+        user.username = username;
     }
 
-    // Reset limit harian
     if (user.last_reset !== today) {
-        db.prepare('UPDATE users SET usage = 0, last_reset = ? WHERE user_id = ?').run(today, userId);
         user.usage = 0;
+        user.last_reset = today;
+        saveDB();
     }
 
-    // Cek expire premium
     if (user.tier !== 'Free' && user.expire_date) {
         const expire = new Date(user.expire_date);
         if (new Date() > expire) {
-            db.prepare("UPDATE users SET tier = 'Free', expire_date = NULL WHERE user_id = ?").run(userId);
             user.tier = 'Free';
             user.expire_date = null;
+            saveDB();
         }
     }
 
@@ -99,11 +94,12 @@ function getUser(userId, username = 'TidakAda', referredBy = null) {
 }
 
 function updateStats(field) {
-    db.prepare(`UPDATE stats SET ${field} = ${field} + 1 WHERE id = 1`).run();
+    db.stats[field] = (db.stats[field] || 0) + 1;
+    saveDB();
 }
 
 function getStats() {
-    return db.prepare('SELECT * FROM stats WHERE id = 1').get();
+    return db.stats;
 }
 
 // ============ HELPER: RATE LIMIT ============
@@ -147,20 +143,17 @@ function isAdmin(userId) {
 async function cekBioWA(sock, nomor) {
     const jid = formatJid(nomor);
     try {
-        // Cek apakah nomor terdaftar di WhatsApp
         const exists = await sock.onWhatsApp(jid);
         if (!exists || exists.length === 0 || !exists[0].exists) {
             return { success: false, bio: '❌ Nomor tidak terdaftar di WhatsApp', registered: false };
         }
 
-        // Fetch bio/status
         try {
             const status = await sock.fetchStatus(jid);
             const bio = status?.status || 'Tidak ada bio';
             const setAt = status?.setAt ? new Date(status.setAt).toLocaleString('id-ID') : '-';
             return { success: true, bio, setAt, registered: true };
         } catch (err) {
-            // Jika fetchStatus gagal, kemungkinan privacy setting
             return { success: true, bio: '🔒 Bio disembunyikan (private)', setAt: '-', registered: true };
         }
     } catch (err) {
@@ -178,8 +171,7 @@ async function cekCooldownOTP(sock, nomor) {
         const exists = await sock.onWhatsApp(jid);
         const registered = exists && exists.length > 0 && exists[0].exists;
 
-        // Cek database untuk cooldown sebelumnya
-        const existing = db.prepare('SELECT * FROM cooldowns WHERE phone = ?').get(phone);
+        const existing = db.cooldowns[phone];
         let status = 'ready';
         let bio = '';
 
@@ -199,9 +191,13 @@ async function cekCooldownOTP(sock, nomor) {
 
         const cooldownUntil = new Date(now.getTime() + config.cooldownDuration * 1000).toISOString();
 
-        db.prepare(`INSERT OR REPLACE INTO cooldowns (phone, status, last_check, cooldown_until)
-                    VALUES (?, ?, ?, ?)`)
-          .run(phone, status, now.toISOString(), cooldownUntil);
+        db.cooldowns[phone] = {
+            phone,
+            status,
+            last_check: now.toISOString(),
+            cooldown_until: status === 'cooldown' ? existing?.cooldown_until : cooldownUntil
+        };
+        saveDB();
 
         return {
             phone,
@@ -209,7 +205,7 @@ async function cekCooldownOTP(sock, nomor) {
             bio,
             registered,
             time: now.toLocaleString('id-ID'),
-            cooldownUntil: status === 'cooldown' ? existing?.cooldown_until : cooldownUntil
+            cooldownUntil: db.cooldowns[phone].cooldown_until
         };
     } catch (err) {
         return null;
@@ -237,7 +233,7 @@ async function massCekWA(sock, numbers) {
                 try {
                     const status = await sock.fetchStatus(jid);
                     bio = status?.status || '';
-                } catch { /* private */ }
+                } catch { }
                 if (bio) results.hasBio++;
                 else results.noBio++;
                 results.details.push({ number: num, registered: true, bio });
@@ -249,7 +245,7 @@ async function massCekWA(sock, numbers) {
             results.notRegistered++;
             results.details.push({ number: num, registered: false, bio: 'Error' });
         }
-        await new Promise(r => setTimeout(r, 800)); // delay anti-ban
+        await new Promise(r => setTimeout(r, 800));
     }
     return results;
 }
@@ -260,7 +256,7 @@ function fmtMenu(userId, user) {
     const limit = config.tierLimits[user.tier] || 5;
     const sisa = limit - user.usage;
     const stats = getStats();
-    const totalUsers = db.prepare('SELECT COUNT(*) as count FROM users').get().count;
+    const totalUsers = Object.keys(db.users).length;
 
     return (
         `🤖 *${config.botName}* 🤖\n` +
@@ -357,7 +353,6 @@ async function handleCommand(sock, msg, userId, text, sender, isGroup) {
     const cmd = args[0].toLowerCase();
     const user = getUser(userId, msg.pushName || 'TidakAda');
 
-    // ========== .menu / .start ==========
     if (cmd === '.menu' || cmd === '.start') {
         let referredBy = null;
         if (args[1] && args[1].startsWith('ref_')) {
@@ -368,7 +363,6 @@ async function handleCommand(sock, msg, userId, text, sender, isGroup) {
         logActivity(userId, 'menu');
     }
 
-    // ========== .detek ==========
     else if (cmd === '.detek') {
         if (isRateLimited(userId)) {
             await sock.sendMessage(sender, { text: '⚠️ Terlalu banyak command. Tunggu sebentar.' });
@@ -391,9 +385,10 @@ async function handleCommand(sock, msg, userId, text, sender, isGroup) {
             return;
         }
 
-        db.prepare('UPDATE users SET usage = usage + 1 WHERE user_id = ?').run(userId);
+        user.usage += 1;
+        saveDB();
         updateStats('total_detections');
-        const sisa = limit - (user.usage + 1);
+        const sisa = limit - user.usage;
 
         await sock.sendMessage(sender, { text: `🔍 Mengecek Bio untuk: ${nomor}\n⏳ Mohon tunggu...` });
 
@@ -418,7 +413,6 @@ async function handleCommand(sock, msg, userId, text, sender, isGroup) {
         logActivity(userId, 'detek', `Nomor: ${nomor}`);
     }
 
-    // ========== .cooldown ==========
     else if (cmd === '.cooldown') {
         if (isRateLimited(userId)) {
             await sock.sendMessage(sender, { text: '⚠️ Terlalu banyak command. Tunggu sebentar.' });
@@ -439,7 +433,8 @@ async function handleCommand(sock, msg, userId, text, sender, isGroup) {
             return;
         }
 
-        db.prepare('UPDATE users SET usage = usage + 1 WHERE user_id = ?').run(userId);
+        user.usage += 1;
+        saveDB();
         updateStats('total_detections');
 
         await sock.sendMessage(sender, { text: `🔍 *OTP COOLDOWN MONITOR*\n📞 Nomor: ${nomor}\n⏳ Mengecek...` });
@@ -453,7 +448,7 @@ async function handleCommand(sock, msg, userId, text, sender, isGroup) {
         const statusEmoji = result.status === 'ready' ? '✅' : '⏳';
         const statusText = result.status === 'ready' ? 'Nomor siap OTP' : 'Nomor sedang cooldown';
 
-        const sisa = (limit - (user.usage + 1));
+        const sisa = limit - user.usage;
         let finalText =
             `🔍 *OTP COOLDOWN MONITOR*\n` +
             `━━━━━━━━━━━━━━━━\n` +
@@ -471,9 +466,8 @@ async function handleCommand(sock, msg, userId, text, sender, isGroup) {
         logActivity(userId, 'cooldown', `Nomor: ${nomor}`);
     }
 
-    // ========== .cooldownlist ==========
     else if (cmd === '.cooldownlist') {
-        const rows = db.prepare('SELECT * FROM cooldowns ORDER BY last_check DESC LIMIT 20').all();
+        const rows = Object.values(db.cooldowns).sort((a, b) => new Date(b.last_check) - new Date(a.last_check)).slice(0, 20);
         if (rows.length === 0) {
             await sock.sendMessage(sender, { text: '📭 Belum ada nomor yang di-cek cooldown.' });
             return;
@@ -495,12 +489,10 @@ async function handleCommand(sock, msg, userId, text, sender, isGroup) {
         await sock.sendMessage(sender, { text });
     }
 
-    // ========== .premium ==========
     else if (cmd === '.premium') {
         await sock.sendMessage(sender, { text: fmtPremium(user) });
     }
 
-    // ========== .beli ==========
     else if (cmd === '.beli') {
         const tier = (args[1] || '').toUpperCase();
         if (!['VIP', 'XVIP', 'VVIP'].includes(tier)) {
@@ -508,8 +500,8 @@ async function handleCommand(sock, msg, userId, text, sender, isGroup) {
             return;
         }
         const price = config.tierPrices[tier];
-        db.prepare('INSERT OR REPLACE INTO pending (user_id, tier, timestamp) VALUES (?, ?, ?)')
-          .run(userId, tier, new Date().toISOString());
+        db.pending[userId] = { tier, timestamp: new Date().toISOString() };
+        saveDB();
 
         let caption =
             `🛒 *PEMBAYARAN TIER ${tier}*\n` +
@@ -529,23 +521,20 @@ async function handleCommand(sock, msg, userId, text, sender, isGroup) {
         }
     }
 
-    // ========== .batal ==========
     else if (cmd === '.batal') {
-        db.prepare('DELETE FROM pending WHERE user_id = ?').run(userId);
+        delete db.pending[userId];
+        saveDB();
         await sock.sendMessage(sender, { text: '✅ Transaksi dibatalkan.' });
     }
 
-    // ========== .akun / .myaccount ==========
     else if (cmd === '.akun' || cmd === '.myaccount') {
         await sock.sendMessage(sender, { text: fmtAkun(userId, user) });
     }
 
-    // ========== .help ==========
     else if (cmd === '.help') {
         await sock.sendMessage(sender, { text: fmtHelp() });
     }
 
-    // ========== ADMIN COMMANDS ==========
     else if (cmd === '.upgrade') {
         if (!isAdmin(userId)) return;
         try {
@@ -564,8 +553,11 @@ async function handleCommand(sock, msg, userId, text, sender, isGroup) {
             }
             baseDate.setDate(baseDate.getDate() + days);
             const newExpire = baseDate.toISOString().split('T')[0];
-            db.prepare('UPDATE users SET tier = ?, expire_date = ? WHERE user_id = ?')
-              .run(targetTier, newExpire, targetId);
+            
+            target.tier = targetTier;
+            target.expire_date = newExpire;
+            saveDB();
+            
             await sock.sendMessage(sender, { text: `✅ User ${targetId} di-upgrade ke *${targetTier}* selama ${days} hari.\nExpire: ${newExpire}` });
             try {
                 await sock.sendMessage(targetId + '@s.whatsapp.net', {
@@ -578,23 +570,31 @@ async function handleCommand(sock, msg, userId, text, sender, isGroup) {
         }
     }
 
-    // ========== .resetlimit ==========
     else if (cmd === '.resetlimit') {
         if (!isAdmin(userId)) return;
         if (args[1] === 'all') {
-            db.prepare("UPDATE users SET usage = 0, last_reset = ?").run(new Date().toISOString().split('T')[0]);
+            const today = new Date().toISOString().split('T')[0];
+            Object.values(db.users).forEach(u => {
+                u.usage = 0;
+                u.last_reset = today;
+            });
+            saveDB();
             await sock.sendMessage(sender, { text: '✅ Limit semua user di-reset!' });
             logActivity(userId, 'resetlimit_all');
         } else if (args[1]) {
-            db.prepare('UPDATE users SET usage = 0 WHERE user_id = ?').run(args[1]);
-            await sock.sendMessage(sender, { text: `✅ Limit user ${args[1]} di-reset!` });
-            logActivity(userId, 'resetlimit', `Target: ${args[1]}`);
+            if (db.users[args[1]]) {
+                db.users[args[1]].usage = 0;
+                saveDB();
+                await sock.sendMessage(sender, { text: `✅ Limit user ${args[1]} di-reset!` });
+                logActivity(userId, 'resetlimit', `Target: ${args[1]}`);
+            } else {
+                await sock.sendMessage(sender, { text: '❌ User tidak ditemukan.' });
+            }
         } else {
             await sock.sendMessage(sender, { text: '❌ Format: .resetlimit <nomor> atau .resetlimit all' });
         }
     }
 
-    // ========== .broadcast ==========
     else if (cmd === '.broadcast') {
         if (!isAdmin(userId)) return;
         const message = args.slice(1).join(' ');
@@ -602,12 +602,12 @@ async function handleCommand(sock, msg, userId, text, sender, isGroup) {
             await sock.sendMessage(sender, { text: '❌ Format: .broadcast <pesan>' });
             return;
         }
-        const users = db.prepare('SELECT user_id FROM users').all();
+        const users = Object.keys(db.users);
         let sent = 0, failed = 0;
-        const progress = await sock.sendMessage(sender, { text: `📢 Mengirim broadcast ke ${users.length} user...` });
-        for (const u of users) {
+        await sock.sendMessage(sender, { text: `📢 Mengirim broadcast ke ${users.length} user...` });
+        for (const uid of users) {
             try {
-                await sock.sendMessage(u.user_id + '@s.whatsapp.net', { text: `📢 *PENGUMUMAN ADMIN*\n\n${message}` });
+                await sock.sendMessage(uid + '@s.whatsapp.net', { text: `📢 *PENGUMUMAN ADMIN*\n\n${message}` });
                 sent++;
                 await new Promise(r => setTimeout(r, 100));
             } catch { failed++; }
@@ -616,10 +616,9 @@ async function handleCommand(sock, msg, userId, text, sender, isGroup) {
         logActivity(userId, 'broadcast', `Sent: ${sent}, Failed: ${failed}`);
     }
 
-    // ========== .listuser ==========
     else if (cmd === '.listuser') {
         if (!isAdmin(userId)) return;
-        const users = db.prepare('SELECT * FROM users ORDER BY rowid DESC LIMIT 50').all();
+        const users = Object.values(db.users).slice(-50).reverse();
         if (users.length === 0) {
             await sock.sendMessage(sender, { text: '📭 Belum ada user terdaftar.' });
             return;
@@ -632,12 +631,11 @@ async function handleCommand(sock, msg, userId, text, sender, isGroup) {
         await sock.sendMessage(sender, { text });
     }
 
-    // ========== .stats ==========
     else if (cmd === '.stats') {
         if (!isAdmin(userId)) return;
         const stats = getStats();
-        const totalUsers = db.prepare('SELECT COUNT(*) as count FROM users').get().count;
-        const totalCooldowns = db.prepare('SELECT COUNT(*) as count FROM cooldowns').get().count;
+        const totalUsers = Object.keys(db.users).length;
+        const totalCooldowns = Object.keys(db.cooldowns).length;
         const text =
             `📊 *STATISTIK BOT*\n` +
             `━━━━━━━━━━━━━━━━\n` +
@@ -653,13 +651,11 @@ async function handleCommand(sock, msg, userId, text, sender, isGroup) {
 
 // ============ HANDLE IMAGE (BUKTI BAYAR) ============
 async function handleImage(sock, msg, userId, sender) {
-    const pending = db.prepare('SELECT tier FROM pending WHERE user_id = ?').get(userId);
-    if (!pending) return; // Bukan dalam mode pembayaran
+    if (!db.pending[userId]) return;
 
-    const tier = pending.tier;
+    const tier = db.pending[userId].tier;
     const price = config.tierPrices[tier];
 
-    // Forward ke admin
     const caption =
         `🛒 *PEMBAYARAN BARU MASUK* 🛒\n` +
         `━━━━━━━━━━━━━━━━\n` +
@@ -684,14 +680,13 @@ async function handleImage(sock, msg, userId, sender) {
             });
         }
     } catch (err) {
-        console.error('Error forwarding image:', err);
-        // Fallback: kirim notifikasi text saja
         for (const adminNum of config.adminNumbers) {
             await sock.sendMessage(adminNum + '@s.whatsapp.net', { text: caption + '\n\n⚠️ Gagal meneruskan gambar.' });
         }
     }
 
-    db.prepare('DELETE FROM pending WHERE user_id = ?').run(userId);
+    delete db.pending[userId];
+    saveDB();
     await sock.sendMessage(sender, {
         text: '✅ *Bukti pembayaran terkirim ke Admin!*\nMohon tunggu verifikasi (max 1x24 jam).'
     });
@@ -755,7 +750,6 @@ async function handleDocument(sock, msg, userId, sender) {
             `━━━━━━━━━━━━━━━━\n` +
             `🕒 ${new Date().toLocaleString('id-ID')}`;
 
-        // Buat file hasil detail
         const csvName = `result_masscheck_${Date.now()}.csv`;
         let csv = 'Nomor,Status,Bio\n';
         for (const d of results.details) {
@@ -774,7 +768,6 @@ async function handleDocument(sock, msg, userId, sender) {
         fs.unlinkSync(csvName);
         logActivity(userId, 'masscheck', `Total: ${numbers.length}`);
     } catch (err) {
-        console.error('Mass check error:', err);
         await sock.sendMessage(sender, { text: `❌ Error: ${err.message}` });
     }
 }
@@ -793,7 +786,7 @@ async function connectToWhatsApp() {
         defaultQueryTimeoutMs: 60000,
     });
 
-    // ============ PAIRING CODE ============
+    // ============ PAIRING CODE (FIXED) ============
     if (!state.creds.registered) {
         const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
         const question = (text) => new Promise((resolve) => rl.question(text, resolve));
@@ -805,25 +798,35 @@ async function connectToWhatsApp() {
         const phoneNumber = await question(chalk.yellow('📲 Masukkan nomor WhatsApp (format: 628xxx): '));
         rl.close();
 
-        if (!phoneNumber || phoneNumber.length < 8) {
-            console.log(chalk.red('❌ Nomor tidak valid!'));
+        const cleanNumber = phoneNumber.replace(/[^0-9]/g, '');
+        if (!cleanNumber || cleanNumber.length < 8) {
+            console.log(chalk.red('❌ Nomor tidak valid! Bot dimatikan.'));
             process.exit(1);
         }
 
+        // Tunggu 3 detik agar socket benar-benar siap menerima request pairing
         setTimeout(async () => {
             try {
-                const code = await sock.requestPairingCode(phoneNumber.trim());
-                console.log(chalk.green('\n╔════════════════════════════════════╗'));
-                console.log(chalk.green.bold(`║  🔑 PAIRING CODE: ${code}            ║`));
-                console.log(chalk.green('╚════════════════════════════════════╝'));
-                console.log(chalk.yellow('\n📱 Cara pakai:'));
+                const code = await sock.requestPairingCode(cleanNumber);
+                const cleanCode = code.replace(/-/g, ''); // Hapus tanda hubung agar mudah dicopy
+                
+                console.log(chalk.green('\n╔════════════════════════════════════════╗'));
+                console.log(chalk.green.bold(`║  🔑 PAIRING CODE: ${cleanCode}            ║`));
+                console.log(chalk.green('╚════════════════════════════════════════╝'));
+                console.log(chalk.yellow('\n📱 CARA PAKAI:'));
                 console.log(chalk.white('   1. Buka WhatsApp di HP'));
-                console.log(chalk.white('   2. Settings > Linked Devices'));
-                console.log(chalk.white('   3. Link a Device'));
-                console.log(chalk.white('   4. Pilih "Link with phone number"'));
-                console.log(chalk.white(`   5. Masukkan kode: ${code}\n`));
+                console.log(chalk.white('   2. Settings (Pengaturan) > Linked Devices (Perangkat tertaut)'));
+                console.log(chalk.white('   3. Link a Device (Tautkan perangkat)'));
+                console.log(chalk.white('   4. Klik "Link with phone number" (Tautkan dengan nomor telepon)'));
+                console.log(chalk.white(`   5. Masukkan kode: ${cleanCode} (TANPA TANDA HUBUNG)\n`));
             } catch (err) {
-                console.error(chalk.red('❌ Gagal mendapatkan pairing code:'), err);
+                console.error(chalk.red('\n❌ Gagal mendapatkan Pairing Code!'));
+                console.error(chalk.red('Detail Error:'), err.message || err);
+                console.log(chalk.yellow('\n💡 TIPS MENGATASI ERROR:'));
+                console.log(chalk.white('   1. Cek tanggal & waktu di HP Anda, pastikan SETEL OTOMATIS!'));
+                console.log(chalk.white('   2. Format nomor harus 628xxx (tanpa tanda + dan tanpa 0 di depan).'));
+                console.log(chalk.white('   3. Pastikan internet stabil.\n'));
+                process.exit(1);
             }
         }, 3000);
     }
@@ -856,29 +859,23 @@ async function connectToWhatsApp() {
         }
     });
 
-    // ============ EVENT: CREDENTIALS UPDATE ============
     sock.ev.on('creds.update', saveCreds);
 
-    // ============ EVENT: MESSAGE ============
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
         if (type !== 'notify') return;
 
         for (const msg of messages) {
             try {
-                // Skip status broadcasts
                 if (msg.key.remoteJid === 'status@broadcast') continue;
-                // Skip self messages
                 if (msg.key.fromMe) continue;
 
                 const sender = msg.key.remoteJid;
                 const isGroup = sender.endsWith('@g.us');
                 const userId = getUserId(msg.key.participant || sender);
 
-                // Handle different message types
                 const messageObj = msg.message;
                 if (!messageObj) continue;
 
-                // Text message
                 let text = '';
                 if (messageObj.conversation) {
                     text = messageObj.conversation;
@@ -886,17 +883,14 @@ async function connectToWhatsApp() {
                     text = messageObj.extendedTextMessage.text;
                 } else if (messageObj.imageMessage?.caption) {
                     text = messageObj.imageMessage.caption;
-                    // Handle image with caption (bukti bayar)
                     if (!text.startsWith(config.prefix)) {
                         await handleImage(sock, msg, userId, sender);
                         continue;
                     }
                 } else if (messageObj.imageMessage && !messageObj.imageMessage.caption) {
-                    // Image without caption = bukti bayar
                     await handleImage(sock, msg, userId, sender);
                     continue;
                 } else if (messageObj.documentMessage) {
-                    // Handle document (mass check)
                     await handleDocument(sock, msg, userId, sender);
                     continue;
                 } else if (messageObj.videoMessage?.caption) {
@@ -909,13 +903,6 @@ async function connectToWhatsApp() {
 
                 if (!text || !text.startsWith(config.prefix)) continue;
 
-                // In group, only respond if bot is mentioned or message starts with prefix
-                if (isGroup) {
-                    // Uncomment below to restrict bot to only respond when mentioned in groups
-                    // const mentionedJids = messageObj.extendedTextMessage?.contextInfo?.mentionedJid || [];
-                    // if (!mentionedJids.includes(sock.user.id)) continue;
-                }
-
                 await handleCommand(sock, msg, userId, text.trim(), sender, isGroup);
 
             } catch (err) {
@@ -927,14 +914,30 @@ async function connectToWhatsApp() {
     return sock;
 }
 
-// ============ DAILY CLEANUP (setiap jam 00:30) ============
+// ============ DAILY CLEANUP ============
 setInterval(() => {
     const now = new Date();
     if (now.getHours() === 0 && now.getMinutes() === 30) {
         const nowIso = now.toISOString();
-        db.prepare('DELETE FROM cooldowns WHERE cooldown_until < ?').run(nowIso);
-        db.prepare("UPDATE users SET tier='Free', expire_date=NULL WHERE tier!='Free' AND expire_date < ?")
-          .run(now.toISOString().split('T')[0]);
+        let changed = false;
+        
+        for (const phone in db.cooldowns) {
+            if (new Date(db.cooldowns[phone].cooldown_until) < now) {
+                delete db.cooldowns[phone];
+                changed = true;
+            }
+        }
+        
+        for (const uid in db.users) {
+            const u = db.users[uid];
+            if (u.tier !== 'Free' && u.expire_date && new Date(u.expire_date) < now) {
+                u.tier = 'Free';
+                u.expire_date = null;
+                changed = true;
+            }
+        }
+        
+        if (changed) saveDB();
         console.log(chalk.blue('🧹 Daily cleanup executed.'));
     }
 }, 60000);
@@ -953,9 +956,7 @@ connectToWhatsApp().catch(err => {
     process.exit(1);
 });
 
-// Handle Ctrl+C
 process.on('SIGINT', () => {
     console.log(chalk.yellow('\n👋 Bot dimatikan...'));
-    db.close();
     process.exit(0);
 });
